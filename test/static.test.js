@@ -996,19 +996,19 @@ test('allowedPath option - pathname is normalized before filtering', async (t) =
     genericErrorResponseChecks(t, response)
   })
 
-  await t.test('//foobar.html not found', async (t) => {
+  await t.test('//foobar.html forbidden (non-canonical path)', async (t) => {
     t.plan(1 + GENERIC_ERROR_RESPONSE_CHECK_COUNT)
 
     const response = await rawRequest(address, '//foobar.html')
-    t.assert.deepStrictEqual(response.statusCode, 404)
+    t.assert.deepStrictEqual(response.statusCode, 403)
     genericErrorResponseChecks(t, response)
   })
 
-  await t.test('/./foobar.html not found', async (t) => {
+  await t.test('/./foobar.html forbidden (non-canonical path)', async (t) => {
     t.plan(1 + GENERIC_ERROR_RESPONSE_CHECK_COUNT)
 
     const response = await rawRequest(address, '/./foobar.html')
-    t.assert.deepStrictEqual(response.statusCode, 404)
+    t.assert.deepStrictEqual(response.statusCode, 403)
     genericErrorResponseChecks(t, response)
   })
 
@@ -3301,16 +3301,19 @@ test(
 test('should not redirect to protocol-relative locations', async (t) => {
   const urls = [
     ['//^/..', null, 403],
-    ['//^/.', null, 404], // it is NOT recognized as a directory by pillarjs/send
+    ['//^/.', null, 403],
     ['//:/..', null, 403],
     ['/\\\\a//google.com/%2e%2e%2f%2e%2e', null, 403],
     ['//a//youtube.com/%2e%2e%2f%2e%2e', null, 403],
     ['/^', null, 404], // it is NOT recognized as a directory by pillarjs/send
-    ['/deep/path/for/test/.', '/deep/path/for/test/', 301],
+    // trailing "/." and "/%2e" are non-canonical (route-guard bypass class)
+    ['/deep/path/for/test/.', null, 403],
+    ['/deep/path/for/test/%2e', null, 403],
+    ['/deep/path/for/test', '/deep/path/for/test/', 301],
     ['//google.com/%2e%2e', null, 403],
     ['//users/%2e%2e', null, 403],
-    ['//users', null, 404],
-    ['///deep/path//for//test//index.html', null, 200]
+    ['//users', null, 403],
+    ['///deep/path//for//test//index.html', null, 403]
   ]
 
   t.plan(urls.length * 2)
@@ -3639,6 +3642,255 @@ test(
     t.assert.deepStrictEqual(response.body, txtContent)
   }
 )
+
+test('wildcard handler falls back to not found when the raw url does not match the route prefix', async (t) => {
+  t.plan(2)
+
+  const fastify = Fastify()
+  let wildcardHandler
+
+  fastify.addHook('onRoute', (route) => {
+    if (route.url === '/static/*') {
+      wildcardHandler = route.handler
+    }
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/static'
+  })
+
+  t.after(() => fastify.close())
+
+  await fastify.ready()
+  t.assert.ok(wildcardHandler)
+
+  let notFoundCalled = false
+  await wildcardHandler({
+    raw: { url: '/nested/static/index.css' },
+    routeOptions: { url: '/static/*' }
+  }, {
+    callNotFound () {
+      notFoundCalled = true
+    }
+  })
+
+  t.assert.deepStrictEqual(notFoundCalled, true)
+})
+
+test('wildcard handler falls back to not found when a param segment is empty', async (t) => {
+  t.plan(2)
+
+  const fastify = Fastify()
+  let wildcardHandler
+
+  fastify.addHook('onRoute', (route) => {
+    if (route.url === '/app/:version/*') {
+      wildcardHandler = route.handler
+    }
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/app/:version'
+  })
+
+  t.after(() => fastify.close())
+
+  await fastify.ready()
+  t.assert.ok(wildcardHandler)
+
+  let notFoundCalled = false
+  await wildcardHandler({
+    raw: { url: '/app//index.css' },
+    routeOptions: { url: '/app/:version/*' }
+  }, {
+    callNotFound () {
+      notFoundCalled = true
+    }
+  })
+
+  t.assert.deepStrictEqual(notFoundCalled, true)
+})
+
+test('wildcard handler falls back to not found when the wildcard remainder is malformed', async (t) => {
+  t.plan(2)
+
+  const fastify = Fastify()
+  let wildcardHandler
+
+  fastify.addHook('onRoute', (route) => {
+    if (route.url === '/app/:version/*') {
+      wildcardHandler = route.handler
+    }
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/app/:version'
+  })
+
+  t.after(() => fastify.close())
+
+  await fastify.ready()
+  t.assert.ok(wildcardHandler)
+
+  let notFoundCalled = false
+  await wildcardHandler({
+    raw: { url: '/app/1.2.3/%E0%A4%A' },
+    routeOptions: { url: '/app/:version/*' }
+  }, {
+    callNotFound () {
+      notFoundCalled = true
+    }
+  })
+
+  t.assert.deepStrictEqual(notFoundCalled, true)
+})
+
+test('wildcard handler falls back to not found when a literal segment after a param does not match', async (t) => {
+  t.plan(2)
+
+  const fastify = Fastify()
+  let wildcardHandler
+
+  fastify.addHook('onRoute', (route) => {
+    if (route.url === '/app/:version/public/*') {
+      wildcardHandler = route.handler
+    }
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/app/:version/public'
+  })
+
+  t.after(() => fastify.close())
+
+  await fastify.ready()
+  t.assert.ok(wildcardHandler)
+
+  let notFoundCalled = false
+  await wildcardHandler({
+    raw: { url: '/app/1.2.3/private/index.css' },
+    routeOptions: { url: '/app/:version/public/*' }
+  }, {
+    callNotFound () {
+      notFoundCalled = true
+    }
+  })
+
+  t.assert.deepStrictEqual(notFoundCalled, true)
+})
+
+test('does not serve static files with encoded path separators', async (t) => {
+  t.plan(6)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  fastify.all('/deep/*', async (_request, reply) => {
+    reply.code(401).send('Unauthorized')
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static')
+  })
+
+  const response = await fastify.inject({
+    method: 'GET',
+    url: '/deep/path/for/test/purpose/foo.html'
+  })
+  t.assert.deepStrictEqual(response.statusCode, 401)
+  t.assert.deepStrictEqual(response.body, 'Unauthorized')
+
+  const encodedPathResponse = await fastify.inject({
+    method: 'GET',
+    url: '/deep%2Fpath/for/test/purpose/foo.html'
+  })
+  t.assert.deepStrictEqual(encodedPathResponse.statusCode, 404)
+  t.assert.deepStrictEqual(encodedPathResponse.json().message, 'Route GET:/deep%2Fpath/for/test/purpose/foo.html not found')
+
+  const lowercaseEncodedPathResponse = await fastify.inject({
+    method: 'GET',
+    url: '/deep%2fpath/for/test/purpose/foo.html'
+  })
+  t.assert.deepStrictEqual(lowercaseEncodedPathResponse.statusCode, 404)
+  t.assert.deepStrictEqual(lowercaseEncodedPathResponse.json().message, 'Route GET:/deep%2fpath/for/test/purpose/foo.html not found')
+})
+
+test('serves wildcard files when registered in an encapsulated context', async (t) => {
+  t.plan(3)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  fastify.register(async function (childContext) {
+    childContext.register(fastifyStatic, {
+      root: path.join(__dirname, '/static'),
+      prefix: '/public',
+      decorateReply: false
+    })
+  }, { prefix: '/nested' })
+
+  const response = await fastify.inject({
+    method: 'GET',
+    url: '/nested/public/index.css'
+  })
+
+  t.assert.deepStrictEqual(response.statusCode, 200)
+  t.assert.deepStrictEqual(response.headers['content-type'], 'text/css; charset=utf-8')
+  t.assert.deepStrictEqual(response.body, fs.readFileSync(path.join(__dirname, '/static/index.css'), 'utf8'))
+})
+
+test('serves wildcard files when prefix contains a route param', async (t) => {
+  t.plan(3)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/app/:version',
+    decorateReply: false
+  })
+
+  const response = await fastify.inject({
+    method: 'GET',
+    url: '/app/1.2.3/index.css'
+  })
+
+  t.assert.deepStrictEqual(response.statusCode, 200)
+  t.assert.deepStrictEqual(response.headers['content-type'], 'text/css; charset=utf-8')
+  t.assert.deepStrictEqual(response.body, fs.readFileSync(path.join(__dirname, '/static/index.css'), 'utf8'))
+})
+
+test('serves wildcard index files when a param prefix uses prefixAvoidTrailingSlash', async (t) => {
+  t.plan(3)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static'),
+    prefix: '/app/:version',
+    prefixAvoidTrailingSlash: true,
+    decorateReply: false
+  })
+
+  const response = await fastify.inject({
+    method: 'GET',
+    url: '/app/1.2.3'
+  })
+
+  t.assert.deepStrictEqual(response.statusCode, 200)
+  t.assert.deepStrictEqual(response.headers['content-type'], 'text/html; charset=utf-8')
+  t.assert.deepStrictEqual(response.body, fs.readFileSync(path.join(__dirname, '/static/index.html'), 'utf8'))
+})
 
 test('content-length in head route should not return zero when using wildcard', async t => {
   t.plan(5)
@@ -4067,4 +4319,94 @@ test('sendFile rejects non-leading dot-dot path segments', async (t) => {
 
   t.assert.deepStrictEqual(response.statusCode, 403)
   t.assert.match(response.body, /Forbidden/u)
+})
+
+test('does not serve static files with non-canonical path segments that bypass route guards', async (t) => {
+  t.plan(12)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  // Same threat model as the parent advisory (CVE-2026-15074): a more-specific
+  // route guard must not be skippable via paths that find-my-way leaves
+  // unnormalized while @fastify/send would collapse them onto the guarded file.
+  fastify.all('/deep/*', async (_request, reply) => {
+    reply.code(401).send('Unauthorized')
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static')
+  })
+
+  await fastify.listen({ port: 0, host: '127.0.0.1' })
+  fastify.server.unref()
+
+  const port = fastify.server.address().port
+  const guarded = '/deep/path/for/test/purpose/foo.html'
+
+  const response = await rawGet(port, guarded)
+  t.assert.deepStrictEqual(response.statusCode, 401)
+  t.assert.deepStrictEqual(response.body, 'Unauthorized')
+
+  // These forms miss /deep/* in find-my-way and would previously fall through
+  // to the static catch-all and serve the guarded file.
+  for (const requestPath of [
+    '//' + guarded.slice(1),
+    '/.' + guarded,
+    '/%2e' + guarded,
+    '/%2E' + guarded,
+    '/foo/.' + guarded
+  ]) {
+    const bypassResponse = await rawGet(port, requestPath)
+    t.assert.deepStrictEqual(
+      bypassResponse.statusCode,
+      403,
+      `expected 403 for ${requestPath}, got ${bypassResponse.statusCode}: ${bypassResponse.body}`
+    )
+    t.assert.match(bypassResponse.body, /Forbidden/u)
+  }
+})
+
+test('does not serve static files with backslash separators that bypass route guards on Windows', async (t) => {
+  t.plan(8)
+
+  const fastify = Fastify()
+
+  t.after(() => fastify.close())
+
+  // On Windows "\" is a separator for @fastify/send but not for posix.normalize
+  // or find-my-way, so a "\" path can skip the /deep/* guard and still be served.
+  fastify.all('/deep/*', async (_request, reply) => {
+    reply.code(401).send('Unauthorized')
+  })
+
+  fastify.register(fastifyStatic, {
+    root: path.join(__dirname, '/static')
+  })
+
+  await fastify.listen({ port: 0, host: '127.0.0.1' })
+  fastify.server.unref()
+
+  const port = fastify.server.address().port
+  const guarded = '/deep/path/for/test/purpose/foo.html'
+  const backslashed = guarded.replace(/\//g, '\\')
+
+  const response = await rawGet(port, guarded)
+  t.assert.deepStrictEqual(response.statusCode, 401)
+  t.assert.deepStrictEqual(response.body, 'Unauthorized')
+
+  for (const requestPath of [
+    '/.' + backslashed,
+    '/%2e%5cdeep%5cpath%5cfor%5ctest%5cpurpose%5cfoo.html',
+    '/foo' + backslashed
+  ]) {
+    const bypassResponse = await rawGet(port, requestPath)
+    t.assert.deepStrictEqual(
+      bypassResponse.statusCode,
+      403,
+      `expected 403 for ${requestPath}, got ${bypassResponse.statusCode}: ${bypassResponse.body}`
+    )
+    t.assert.match(bypassResponse.body, /Forbidden/u)
+  }
 })
